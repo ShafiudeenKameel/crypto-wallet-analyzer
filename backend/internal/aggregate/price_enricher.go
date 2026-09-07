@@ -100,7 +100,7 @@ func (e *PriceEnricher) worker(ctx context.Context, txs []domain.Transaction, jo
 // fee's USD value for a single transaction.
 func (e *PriceEnricher) priceOne(ctx context.Context, tx domain.Transaction) (domain.Transaction, error) {
 	asset := domain.AssetRef{ChainID: tx.ChainID, ContractAddress: tx.ContractAddress, Symbol: tx.AssetSymbol}
-	price, granularity, err := e.fetchPrice(ctx, asset, tx.BlockTimestamp)
+	price, granularity, err := e.FetchPrice(ctx, asset, tx.BlockTimestamp)
 	if err != nil {
 		return tx, err
 	}
@@ -114,7 +114,7 @@ func (e *PriceEnricher) priceOne(ctx context.Context, tx domain.Transaction) (do
 	gasPrice := price
 	if !(tx.ContractAddress == nil && tx.AssetSymbol == tx.GasFeeAsset) {
 		gasAsset := domain.AssetRef{ChainID: tx.ChainID, Symbol: tx.GasFeeAsset}
-		gasPrice, _, err = e.fetchPrice(ctx, gasAsset, tx.BlockTimestamp)
+		gasPrice, _, err = e.FetchPrice(ctx, gasAsset, tx.BlockTimestamp)
 		if err != nil {
 			return tx, err
 		}
@@ -125,10 +125,12 @@ func (e *PriceEnricher) priceOne(ctx context.Context, tx domain.Transaction) (do
 	return tx, nil
 }
 
-// fetchPrice looks up asset's price, retrying on rate-limit errors via the
-// shared provider.RetryOnRateLimit - the same helper every concrete
-// provider implementation uses, so backoff behavior is defined once.
-func (e *PriceEnricher) fetchPrice(ctx context.Context, asset domain.AssetRef, at time.Time) (decimal.Decimal, domain.PriceGranularity, error) {
+// FetchPrice looks up one asset's price, respecting the enricher's shared
+// rate limiter and retrying on rate-limit errors via provider.RetryOnRateLimit.
+// Exported so callers outside a batch Enrich (e.g. a one-off current-price
+// lookup for unrealized gain) reuse the same limiter and backoff policy
+// instead of a third copy of this logic.
+func (e *PriceEnricher) FetchPrice(ctx context.Context, asset domain.AssetRef, at time.Time) (decimal.Decimal, domain.PriceGranularity, error) {
 	var price decimal.Decimal
 	var granularity domain.PriceGranularity
 
