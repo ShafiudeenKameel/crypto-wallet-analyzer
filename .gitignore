@@ -1,0 +1,17 @@
+# Go
+/backend/crypto-wallet-analyzer
+*.exe
+*.test
+*.out
+
+# Env / secrets - API keys live only in these, never committed
+.env
+.env.*
+!.env.example
+
+# Frontend (Vue/Vite) - added ahead of time, harmless if unused for now
+frontend/node_modules/
+frontend/dist/
+
+# OS / editor
+.DS_Store
