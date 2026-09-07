@@ -48,6 +48,9 @@ type Transaction struct {
 	Type      TxType
 	Direction Direction
 
+	FromAddress string
+	ToAddress   string
+
 	AssetSymbol     string
 	ContractAddress *string // nil => native token (ETH, MATIC/POL, ...)
 	AssetDecimals   int     // e.g. 18 for ETH, 6 for USDC
