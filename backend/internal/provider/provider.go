@@ -19,5 +19,8 @@ type BlockchainProvider interface {
 
 // PriceProvider looks up the USD price of an asset at a point in time.
 type PriceProvider interface {
+	// Name identifies this provider for domain.Transaction.PriceSource,
+	// so callers never hard-code a specific provider's name.
+	Name() string
 	GetPriceAt(ctx context.Context, asset domain.AssetRef, at time.Time) (price decimal.Decimal, granularity domain.PriceGranularity, err error)
 }
