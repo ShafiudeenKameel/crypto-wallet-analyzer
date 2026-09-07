@@ -1,0 +1,163 @@
+package etherscan
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"testing"
+
+	"github.com/shopspring/decimal"
+)
+
+func usd(v string) decimal.Decimal { return decimal.RequireFromString(v) }
+
+func newTestClient(t *testing.T, handler http.HandlerFunc) *Client {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+
+	c := NewClient("")
+	c.baseURL = srv.URL
+	return c
+}
+
+func writeEnvelope(w http.ResponseWriter, result any) {
+	json.NewEncoder(w).Encode(map[string]any{"status": "1", "message": "OK", "result": result})
+}
+
+func TestFetchTransactions_MapsNativeAndTokenRecords(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("action") {
+		case "txlist":
+			writeEnvelope(w, []map[string]string{{
+				"blockNumber": "100", "timeStamp": "1700000000", "hash": "0xnative",
+				"from": "0xAlice", "to": "0xBob", "value": "1000000000000000000", // 1 ETH in wei
+				"gasUsed": "21000", "gasPrice": "2000000000", "isError": "0",
+			}})
+		case "tokentx":
+			writeEnvelope(w, []map[string]string{{
+				"blockNumber": "101", "timeStamp": "1700000100", "hash": "0xtoken",
+				"from": "0xAlice", "to": "0xBob", "value": "5000000", // 5 USDC (6 decimals)
+				"contractAddress": "0xUSDC", "tokenSymbol": "USDC", "tokenDecimal": "6",
+				"gasUsed": "50000", "gasPrice": "2000000000",
+			}})
+		}
+	})
+
+	txs, err := c.FetchTransactions(context.Background(), "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", 1)
+	if err != nil {
+		t.Fatalf("FetchTransactions failed: %v", err)
+	}
+	if len(txs) != 2 {
+		t.Fatalf("got %d transactions, want 2", len(txs))
+	}
+
+	native, token := txs[0], txs[1]
+	if native.TxHash != "0xnative" || !native.Success || native.ContractAddress != nil {
+		t.Errorf("native tx mapped wrong: %+v", native)
+	}
+	if !native.Amount.Equal(usd("1")) {
+		t.Errorf("native amount = %s, want 1 (wei->ETH shift)", native.Amount)
+	}
+	if native.ExplorerURL != "https://etherscan.io/tx/0xnative" {
+		t.Errorf("ExplorerURL = %q", native.ExplorerURL)
+	}
+
+	if token.TxHash != "0xtoken" || token.ContractAddress == nil || *token.ContractAddress != "0xUSDC" {
+		t.Errorf("token tx mapped wrong: %+v", token)
+	}
+	if !token.Amount.Equal(usd("5")) {
+		t.Errorf("token amount = %s, want 5 (6-decimal shift)", token.Amount)
+	}
+	if !token.Success {
+		t.Error("token transfer Success = false, want true (Transfer events only exist for successful calls)")
+	}
+}
+
+func TestFetchTransactions_RejectsInvalidAddressBeforeAnyRequest(t *testing.T) {
+	called := false
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { called = true })
+
+	_, err := c.FetchTransactions(context.Background(), "not-an-address", 1)
+	if err == nil {
+		t.Fatal("err = nil, want an address-validation error")
+	}
+	if called {
+		t.Error("network was called despite an invalid address - validation must happen first")
+	}
+}
+
+func TestFetchTransactions_UnsupportedChainNeverCallsNetwork(t *testing.T) {
+	called := false
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { called = true })
+
+	_, err := c.FetchTransactions(context.Background(), "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", 999999)
+	if err == nil {
+		t.Fatal("err = nil, want an unsupported-chain error")
+	}
+	if called {
+		t.Error("network was called for an unsupported chain")
+	}
+}
+
+// TestFetchTransactions_AdvancesPastTenThousandWindow proves the wallet
+// isn't silently truncated once Etherscan's page*offset<=10000 window is
+// exhausted: 10 full pages (10000 records) must trigger a startblock
+// advance and a fresh page-1 request, picking up the remaining records.
+func TestFetchTransactions_AdvancesPastTenThousandWindow(t *testing.T) {
+	var txlistRequests int
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("action") == "tokentx" {
+			writeEnvelope(w, []map[string]string{})
+			return
+		}
+		txlistRequests++
+
+		startBlock, _ := strconv.Atoi(q.Get("startblock"))
+		page, _ := strconv.Atoi(q.Get("page"))
+		count := pageSize
+		if startBlock != 0 {
+			count = 500 // round 2's first page - partial, ends pagination
+		}
+
+		records := make([]map[string]string, count)
+		for i := 0; i < count; i++ {
+			blockNum := startBlock + (page-1)*pageSize + i
+			records[i] = map[string]string{
+				"blockNumber": strconv.Itoa(blockNum), "timeStamp": "1700000000", "hash": "0x" + strconv.Itoa(blockNum),
+				"from": "0xAlice", "to": "0xBob", "value": "0", "gasUsed": "21000", "gasPrice": "1", "isError": "0",
+			}
+		}
+		writeEnvelope(w, records)
+	})
+
+	txs, err := c.FetchTransactions(context.Background(), "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", 1)
+	if err != nil {
+		t.Fatalf("FetchTransactions failed: %v", err)
+	}
+
+	wantTotal := 10*pageSize + 500
+	if len(txs) != wantTotal {
+		t.Errorf("got %d transactions, want %d", len(txs), wantTotal)
+	}
+	if wantRequests := 11; txlistRequests != wantRequests {
+		t.Errorf("made %d txlist requests, want %d (10 to fill the window + 1 after advancing startblock)", txlistRequests, wantRequests)
+	}
+}
+
+func TestFetchTransactions_NoTransactionsFoundIsNotAnError(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"status": "0", "message": "No transactions found", "result": []any{}})
+	})
+
+	txs, err := c.FetchTransactions(context.Background(), "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", 1)
+	if err != nil {
+		t.Fatalf("FetchTransactions failed: %v", err)
+	}
+	if len(txs) != 0 {
+		t.Errorf("got %d transactions, want 0", len(txs))
+	}
+}

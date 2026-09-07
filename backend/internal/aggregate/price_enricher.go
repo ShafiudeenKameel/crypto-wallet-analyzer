@@ -6,7 +6,6 @@ package aggregate
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -126,34 +125,26 @@ func (e *PriceEnricher) priceOne(ctx context.Context, tx domain.Transaction) (do
 	return tx, nil
 }
 
-// fetchPrice looks up asset's price, retrying on rate-limit errors with
-// exponential backoff. Shared by priceOne's two lookups (main asset, gas
-// asset) so the retry/backoff logic exists exactly once.
+// fetchPrice looks up asset's price, retrying on rate-limit errors via the
+// shared provider.RetryOnRateLimit - the same helper every concrete
+// provider implementation uses, so backoff behavior is defined once.
 func (e *PriceEnricher) fetchPrice(ctx context.Context, asset domain.AssetRef, at time.Time) (decimal.Decimal, domain.PriceGranularity, error) {
-	var lastErr error
-	for attempt := 0; attempt <= e.MaxRetries; attempt++ {
-		if attempt > 0 {
-			backoff := time.Duration(1<<attempt) * 200 * time.Millisecond
-			select {
-			case <-time.After(backoff):
-			case <-ctx.Done():
-				return decimal.Decimal{}, "", ctx.Err()
-			}
-		}
+	var price decimal.Decimal
+	var granularity domain.PriceGranularity
 
+	err := provider.RetryOnRateLimit(ctx, e.MaxRetries, func() error {
 		if err := e.Limiter.Wait(ctx); err != nil {
-			return decimal.Decimal{}, "", err
+			return err // ctx cancellation, not a rate-limit error - don't retry
 		}
-
-		price, granularity, err := e.Prices.GetPriceAt(ctx, asset, at)
-		if err == nil {
-			return price, granularity, nil
+		p, g, err := e.Prices.GetPriceAt(ctx, asset, at)
+		if err != nil {
+			return err
 		}
-
-		lastErr = err
-		if !errors.Is(err, provider.ErrRateLimited) {
-			return decimal.Decimal{}, "", err // not a rate-limit error - retrying won't help
-		}
+		price, granularity = p, g
+		return nil
+	})
+	if err != nil {
+		return decimal.Decimal{}, "", fmt.Errorf("price lookup failed: %w", err)
 	}
-	return decimal.Decimal{}, "", fmt.Errorf("price lookup failed after %d retries: %w", e.MaxRetries, lastErr)
+	return price, granularity, nil
 }
