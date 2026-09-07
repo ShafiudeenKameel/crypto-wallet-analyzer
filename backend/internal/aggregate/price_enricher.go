@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shopspring/decimal"
 	"golang.org/x/time/rate"
 
 	"github.com/ShafiudeenKameel/crypto-wallet-analyzer/backend/internal/domain"
@@ -96,11 +97,39 @@ func (e *PriceEnricher) worker(ctx context.Context, txs []domain.Transaction, jo
 	}
 }
 
-// priceOne looks up and applies the price for a single transaction,
-// retrying on rate-limit errors with exponential backoff.
+// priceOne looks up and applies both the main asset's price and the gas
+// fee's USD value for a single transaction.
 func (e *PriceEnricher) priceOne(ctx context.Context, tx domain.Transaction) (domain.Transaction, error) {
 	asset := domain.AssetRef{ChainID: tx.ChainID, ContractAddress: tx.ContractAddress, Symbol: tx.AssetSymbol}
+	price, granularity, err := e.fetchPrice(ctx, asset, tx.BlockTimestamp)
+	if err != nil {
+		return tx, err
+	}
+	tx.PriceUSD = &price
+	tx.PriceSource = e.Prices.Name()
+	tx.PriceTimestampUsed = tx.BlockTimestamp
+	tx.PriceGranularity = granularity
 
+	// The tx's own asset already IS the native gas token - reuse the price
+	// we just fetched instead of spending another rate-limited call on it.
+	gasPrice := price
+	if !(tx.ContractAddress == nil && tx.AssetSymbol == tx.GasFeeAsset) {
+		gasAsset := domain.AssetRef{ChainID: tx.ChainID, Symbol: tx.GasFeeAsset}
+		gasPrice, _, err = e.fetchPrice(ctx, gasAsset, tx.BlockTimestamp)
+		if err != nil {
+			return tx, err
+		}
+	}
+	gasUSD := tx.GasFeeAmount.Mul(gasPrice)
+	tx.GasFeeUSD = &gasUSD
+
+	return tx, nil
+}
+
+// fetchPrice looks up asset's price, retrying on rate-limit errors with
+// exponential backoff. Shared by priceOne's two lookups (main asset, gas
+// asset) so the retry/backoff logic exists exactly once.
+func (e *PriceEnricher) fetchPrice(ctx context.Context, asset domain.AssetRef, at time.Time) (decimal.Decimal, domain.PriceGranularity, error) {
 	var lastErr error
 	for attempt := 0; attempt <= e.MaxRetries; attempt++ {
 		if attempt > 0 {
@@ -108,27 +137,23 @@ func (e *PriceEnricher) priceOne(ctx context.Context, tx domain.Transaction) (do
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
-				return tx, ctx.Err()
+				return decimal.Decimal{}, "", ctx.Err()
 			}
 		}
 
 		if err := e.Limiter.Wait(ctx); err != nil {
-			return tx, err
+			return decimal.Decimal{}, "", err
 		}
 
-		price, granularity, err := e.Prices.GetPriceAt(ctx, asset, tx.BlockTimestamp)
+		price, granularity, err := e.Prices.GetPriceAt(ctx, asset, at)
 		if err == nil {
-			tx.PriceUSD = &price
-			tx.PriceSource = e.Prices.Name()
-			tx.PriceTimestampUsed = tx.BlockTimestamp
-			tx.PriceGranularity = granularity
-			return tx, nil
+			return price, granularity, nil
 		}
 
 		lastErr = err
 		if !errors.Is(err, provider.ErrRateLimited) {
-			return tx, err // not a rate-limit error - retrying won't help
+			return decimal.Decimal{}, "", err // not a rate-limit error - retrying won't help
 		}
 	}
-	return tx, fmt.Errorf("price lookup failed after %d retries: %w", e.MaxRetries, lastErr)
+	return decimal.Decimal{}, "", fmt.Errorf("price lookup failed after %d retries: %w", e.MaxRetries, lastErr)
 }

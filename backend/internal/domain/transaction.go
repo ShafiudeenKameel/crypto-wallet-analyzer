@@ -59,9 +59,14 @@ type Transaction struct {
 	GasFeeAmount decimal.Decimal
 	GasFeeAsset  string
 
+	// PriceUSD is a per-unit spot price (e.g. $/ETH); GasFeeUSD is the
+	// already-multiplied total USD value of GasFeeAmount, since it's
+	// often priced against a different asset (the chain's native token)
+	// than AssetSymbol.
 	PriceUSD           *decimal.Decimal // nil if unpriced
 	PriceSource        string
 	PriceTimestampUsed time.Time
 	PriceGranularity   PriceGranularity
+	GasFeeUSD          *decimal.Decimal // nil if unpriced
 	ExplorerURL        string
 }
