@@ -8,11 +8,20 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 
 	"golang.org/x/time/rate"
 
 	"github.com/ShafiudeenKameel/crypto-wallet-analyzer/backend/internal/analysis"
 )
+
+// requestTimeout bounds how long a single /api/analyze call may run,
+// regardless of client behavior - a truly pathological wallet (or a
+// client that never disconnects) shouldn't be able to hang a server
+// goroutine forever. Kept slightly under the frontend's own timeout (see
+// api.ts's REQUEST_TIMEOUT_MS) so the backend gets a chance to return a
+// real error before the frontend just gives up waiting.
+const requestTimeout = 170 * time.Second
 
 // Analyzer is what a Server needs from the pipeline. *analysis.Service
 // satisfies it; tests can supply a trivial fake instead of standing up a
@@ -77,7 +86,10 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.analyzer.Analyze(r.Context(), req.WalletAddress, req.ChainID)
+	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
+	defer cancel()
+
+	result, err := s.analyzer.Analyze(ctx, req.WalletAddress, req.ChainID)
 	if err != nil {
 		// Log the real error server-side; the client gets a generic
 		// message - never our internal error text (which could

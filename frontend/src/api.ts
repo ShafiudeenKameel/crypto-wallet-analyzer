@@ -5,7 +5,14 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
 // A hung request should never leave the UI stuck forever - the same
 // don't-wait-indefinitely instinct the backend applies with context
 // deadlines, just enforced client-side here.
-const REQUEST_TIMEOUT_MS = 30_000
+//
+// 3 minutes, not 30 seconds: a genuinely active wallet (many distinct
+// pricing days, deliberately rate-limited to stay under CoinGecko's free
+// tier - see aggregate.NewPriceEnricher) can legitimately take a couple
+// of minutes to finish. This must stay >= the backend's own request
+// timeout (see httpapi.requestTimeout) so the backend gets a chance to
+// return a real error before this just gives up waiting.
+const REQUEST_TIMEOUT_MS = 3 * 60 * 1000
 
 export class ApiError extends Error {
   readonly status: number
