@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: crypto-wallet-analyzer-backend
+    runtime: go
+    plan: free
+    rootDir: backend
+    buildCommand: go build -o bin/server ./cmd/server
+    startCommand: ./bin/server
+    envVars:
+      # PORT is intentionally not declared here - Render auto-injects it,
+      # and cmd/server already reads it via os.Getenv with a fallback.
+      - key: ALLOWED_ORIGIN
+        sync: false # set to the deployed Vercel URL once known - see DEPLOY.md
+      - key: ETHERSCAN_API_KEY
+        sync: false # optional - falls back to Etherscan's public tier if unset
+      - key: COINGECKO_API_KEY
+        sync: false # optional - falls back to CoinGecko's public tier if unset
