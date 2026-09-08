@@ -18,29 +18,32 @@ type CurrentPrice struct {
 
 // Lot is a still-unconsumed acquisition - i.e. current holdings.
 type Lot struct {
-	Quantity     decimal.Decimal `json:"quantity"`
-	CostBasisUSD decimal.Decimal `json:"costBasisUSD"`
-	AcquiredAt   time.Time       `json:"acquiredAt"`
-	SourceTxHash string          `json:"sourceTxHash"`
+	Quantity          decimal.Decimal `json:"quantity"`
+	CostBasisUSD      decimal.Decimal `json:"costBasisUSD"`
+	AcquiredAt        time.Time       `json:"acquiredAt"`
+	SourceTxHash      string          `json:"sourceTxHash"`
+	SourceExplorerURL string          `json:"sourceExplorerUrl"`
 }
 
 // Disposal is one FIFO-matched transfer-out of an asset.
 type Disposal struct {
-	SourceTxHash    string          `json:"sourceTxHash"`
-	Quantity        decimal.Decimal `json:"quantity"`
-	ProceedsUSD     decimal.Decimal `json:"proceedsUSD"`
-	CostBasisUSD    decimal.Decimal `json:"costBasisUSD"`
-	RealizedGainUSD decimal.Decimal `json:"realizedGainUSD"`
+	SourceTxHash      string          `json:"sourceTxHash"`
+	SourceExplorerURL string          `json:"sourceExplorerUrl"`
+	Quantity          decimal.Decimal `json:"quantity"`
+	ProceedsUSD       decimal.Decimal `json:"proceedsUSD"`
+	CostBasisUSD      decimal.Decimal `json:"costBasisUSD"`
+	RealizedGainUSD   decimal.Decimal `json:"realizedGainUSD"`
 }
 
 // IncomeEvent is a staking reward or airdrop, valued at fair market value
 // when received - that value is both taxable income and the new lot's
 // cost basis.
 type IncomeEvent struct {
-	SourceTxHash string          `json:"sourceTxHash"`
-	Type         domain.TxType   `json:"type"`
-	Quantity     decimal.Decimal `json:"quantity"`
-	ValueUSD     decimal.Decimal `json:"valueUSD"`
+	SourceTxHash      string          `json:"sourceTxHash"`
+	SourceExplorerURL string          `json:"sourceExplorerUrl"`
+	Type              domain.TxType   `json:"type"`
+	Quantity          decimal.Decimal `json:"quantity"`
+	ValueUSD          decimal.Decimal `json:"valueUSD"`
 }
 
 // AssetSummary is the FIFO result for one asset. Assets are never merged

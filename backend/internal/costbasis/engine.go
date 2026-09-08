@@ -136,20 +136,22 @@ func gasPaidUSD(tx domain.Transaction) (decimal.Decimal, bool) {
 
 func (s *state) recordAcquisition(tx domain.Transaction, valueUSD decimal.Decimal) {
 	s.lots = append(s.lots, Lot{
-		Quantity:     tx.Amount,
-		CostBasisUSD: valueUSD,
-		AcquiredAt:   tx.BlockTimestamp,
-		SourceTxHash: tx.TxHash,
+		Quantity:          tx.Amount,
+		CostBasisUSD:      valueUSD,
+		AcquiredAt:        tx.BlockTimestamp,
+		SourceTxHash:      tx.TxHash,
+		SourceExplorerURL: tx.ExplorerURL,
 	})
 	s.totalSpentUSD = s.totalSpentUSD.Add(valueUSD)
 
 	if tx.Type == domain.TxStakingReward || tx.Type == domain.TxAirdrop {
 		s.totalIncomeUSD = s.totalIncomeUSD.Add(valueUSD)
 		s.incomeEvents = append(s.incomeEvents, IncomeEvent{
-			SourceTxHash: tx.TxHash,
-			Type:         tx.Type,
-			Quantity:     tx.Amount,
-			ValueUSD:     valueUSD,
+			SourceTxHash:      tx.TxHash,
+			SourceExplorerURL: tx.ExplorerURL,
+			Type:              tx.Type,
+			Quantity:          tx.Amount,
+			ValueUSD:          valueUSD,
 		})
 	}
 }
@@ -161,11 +163,12 @@ func (s *state) recordDisposal(tx domain.Transaction, proceedsUSD decimal.Decima
 	s.totalReceivedUSD = s.totalReceivedUSD.Add(proceedsUSD)
 	s.realizedGainUSD = s.realizedGainUSD.Add(gain)
 	s.disposals = append(s.disposals, Disposal{
-		SourceTxHash:    tx.TxHash,
-		Quantity:        tx.Amount,
-		ProceedsUSD:     proceedsUSD,
-		CostBasisUSD:    costBasisUSD,
-		RealizedGainUSD: gain,
+		SourceTxHash:      tx.TxHash,
+		SourceExplorerURL: tx.ExplorerURL,
+		Quantity:          tx.Amount,
+		ProceedsUSD:       proceedsUSD,
+		CostBasisUSD:      costBasisUSD,
+		RealizedGainUSD:   gain,
 	})
 }
 
