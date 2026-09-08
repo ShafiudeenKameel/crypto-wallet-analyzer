@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 )
@@ -145,6 +146,27 @@ func TestFetchTransactions_AdvancesPastTenThousandWindow(t *testing.T) {
 	}
 	if wantRequests := 11; txlistRequests != wantRequests {
 		t.Errorf("made %d txlist requests, want %d (10 to fill the window + 1 after advancing startblock)", txlistRequests, wantRequests)
+	}
+}
+
+// TestFetchTransactions_FetchesTxlistAndTokentxConcurrently proves the two
+// endpoints run in parallel rather than one after the other: each response
+// is delayed 50ms, so a sequential implementation would take >=100ms while
+// a concurrent one takes ~50ms.
+func TestFetchTransactions_FetchesTxlistAndTokentxConcurrently(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		writeEnvelope(w, []map[string]string{})
+	})
+
+	start := time.Now()
+	if _, err := c.FetchTransactions(context.Background(), "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed", 1); err != nil {
+		t.Fatalf("FetchTransactions failed: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if elapsed >= 90*time.Millisecond {
+		t.Errorf("took %v, want close to 50ms (concurrent) not ~100ms (sequential)", elapsed)
 	}
 }
 

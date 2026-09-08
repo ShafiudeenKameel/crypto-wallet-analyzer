@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -79,13 +80,31 @@ func (c *Client) FetchTransactions(ctx context.Context, walletAddress string, ch
 		return nil, fmt.Errorf("etherscan: %w", err)
 	}
 
-	normal, err := fetchPaginated[rawNormalTx](ctx, c, chainID, "txlist", checksummed)
-	if err != nil {
-		return nil, fmt.Errorf("etherscan: fetching normal transactions: %w", err)
+	// txlist and tokentx are independent API calls - fetching them
+	// concurrently instead of one after the other roughly halves this
+	// phase's wall-clock time. Each goroutine only ever writes its own
+	// two result variables, so there's no shared mutable state to guard.
+	var normal []rawNormalTx
+	var tokenTransfers []rawTokenTx
+	var normalErr, tokenErr error
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		normal, normalErr = fetchPaginated[rawNormalTx](ctx, c, chainID, "txlist", checksummed)
+	}()
+	go func() {
+		defer wg.Done()
+		tokenTransfers, tokenErr = fetchPaginated[rawTokenTx](ctx, c, chainID, "tokentx", checksummed)
+	}()
+	wg.Wait()
+
+	if normalErr != nil {
+		return nil, fmt.Errorf("etherscan: fetching normal transactions: %w", normalErr)
 	}
-	tokenTransfers, err := fetchPaginated[rawTokenTx](ctx, c, chainID, "tokentx", checksummed)
-	if err != nil {
-		return nil, fmt.Errorf("etherscan: fetching token transfers: %w", err)
+	if tokenErr != nil {
+		return nil, fmt.Errorf("etherscan: fetching token transfers: %w", tokenErr)
 	}
 
 	txs := make([]domain.Transaction, 0, len(normal)+len(tokenTransfers))
