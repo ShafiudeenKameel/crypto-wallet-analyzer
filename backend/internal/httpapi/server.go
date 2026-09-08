@@ -21,6 +21,13 @@ import (
 // goroutine forever. Kept slightly under the frontend's own timeout (see
 // api.ts's REQUEST_TIMEOUT_MS) so the backend gets a chance to return a
 // real error before the frontend just gives up waiting.
+//
+// This is also a real, reachable ceiling, not just defense-in-depth: an
+// extremely high-volume wallet (see etherscan.Client.FetchTransactions'
+// doc comment) can need more total Etherscan pages than our shared rate
+// limiter can serve within this window. That's an accepted limitation
+// for a free-tier demo, not a bug - see project.MD's own scoping stance
+// on not over-engineering for the rare extreme case.
 const requestTimeout = 170 * time.Second
 
 // Analyzer is what a Server needs from the pipeline. *analysis.Service

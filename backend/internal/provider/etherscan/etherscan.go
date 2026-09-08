@@ -100,6 +100,20 @@ func NewClient(apiKey string) *Client {
 
 // FetchTransactions implements provider.BlockchainProvider: native
 // transfers (txlist) and ERC-20 transfers (tokentx), fully paginated.
+//
+// Known ceiling, not fixable by more concurrency: txlist and tokentx
+// share one rate limiter (~4 req/s, to stay under Etherscan's free-tier
+// limit), so combined throughput across both is capped regardless of
+// how many pages fetch in parallel within a wave - concurrency hides
+// per-request latency, it doesn't raise how many requests/second we're
+// allowed to make. A wallet needing more than roughly (httpapi's request
+// timeout * 4) combined pages will hit context deadline exceeded during
+// fetch, before pricing even starts. Confirmed live against one of the
+// most active real addresses in existence (extremely high ERC-20
+// transfer volume) - not fixed, since the vast majority of real wallets
+// never approach this scale, and the real fixes (a paid Etherscan tier,
+// or a much longer timeout) trade real cost or UX against a demo app's
+// free-tier constraints.
 func (c *Client) FetchTransactions(ctx context.Context, walletAddress string, chainID int) ([]domain.Transaction, error) {
 	info, ok := chains[chainID]
 	if !ok {
