@@ -223,7 +223,10 @@ func fetchPage[T any](ctx context.Context, c *Client, chainID int, action, addre
 		if env.Message == "No transactions found" {
 			return nil, nil // an empty page, not an error
 		}
-		return nil, fmt.Errorf("api error: %s", env.Message)
+		// The actual reason (e.g. "Missing/Invalid API Key") lives in
+		// result, not message, when status != "1" - message alone is
+		// often just the unhelpful literal string "NOTOK".
+		return nil, fmt.Errorf("api error: %s (%s)", env.Message, env.Result)
 	}
 
 	var records []T
