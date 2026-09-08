@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+	"golang.org/x/time/rate"
 
 	"github.com/ShafiudeenKameel/crypto-wallet-analyzer/backend/internal/domain"
 	"github.com/ShafiudeenKameel/crypto-wallet-analyzer/backend/internal/ethaddr"
@@ -22,10 +23,11 @@ import (
 )
 
 const (
-	defaultBaseURL = "https://api.etherscan.io/v2/api"
-	pageSize       = 1000
-	maxWindow      = 10000 // Etherscan: page * offset must stay <= 10000
-	maxRetries     = 4
+	defaultBaseURL    = "https://api.etherscan.io/v2/api"
+	pageSize          = 1000
+	maxWindow         = 10000 // Etherscan: page * offset must stay <= 10000
+	maxPagesPerWindow = maxWindow / pageSize
+	maxRetries        = 4
 )
 
 // chainInfo maps a chain ID to what's needed to fetch and link its data.
@@ -52,16 +54,47 @@ type Client struct {
 	apiKey     string
 	httpClient *http.Client
 	baseURL    string // overridable in tests only - production must stay https
+
+	// limiter caps actual request rate to Etherscan (~5/s on the free
+	// tier) - concurrency (pageWaveSize) alone only bounds how many
+	// requests are in flight at once, not how many happen per second,
+	// same lesson as aggregate.PriceEnricher's CoinGecko limiter.
+	limiter *rate.Limiter
+	// pageWaveSize is how many pages of one pagination window are
+	// fetched concurrently. Bounded rather than "fetch the whole window
+	// at once" so a small wallet (the vast majority of real ones) only
+	// wastes a few calls past its true end, not up to nine.
+	pageWaveSize int
 }
 
 // NewClient builds a Client. apiKey should come from an environment
 // variable at the call site (see cmd/server) - this package never reads
 // the environment itself.
 func NewClient(apiKey string) *Client {
+	const pageWaveSize = 4
+
+	// Go's default transport caps idle connections at 2 per host - fine
+	// for occasional requests, but we deliberately fire up to 2*pageWaveSize
+	// concurrent requests to Etherscan (txlist + tokentx each waving
+	// pageWaveSize at once). Without raising this, most of those
+	// concurrent requests can't reuse a pooled connection and pay a fresh
+	// TCP+TLS handshake instead - Clone() keeps every other default
+	// (proxy support, TLS config) rather than reconstructing them by hand.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = 2 * pageWaveSize
+
 	return &Client{
 		apiKey:     apiKey,
-		httpClient: &http.Client{Timeout: 20 * time.Second},
+		httpClient: &http.Client{Timeout: 20 * time.Second, Transport: transport},
 		baseURL:    defaultBaseURL,
+		// Burst covers the real peak: txlist and tokentx fetch concurrently
+		// with each other (see FetchTransactions), so both can fire a full
+		// wave of pageWaveSize requests at the same instant - burst needs
+		// room for both waves, not just one, or the second stream queues
+		// for no reason. Steady rate (4/s) is what actually protects
+		// Etherscan's ~5/s free-tier ceiling over a long pagination run.
+		limiter:      rate.NewLimiter(rate.Limit(4), 2*pageWaveSize),
+		pageWaveSize: pageWaveSize,
 	}
 }
 
@@ -136,48 +169,21 @@ type blockNumbered interface {
 // page*offset at 10000 ("result window too large" past that) - once hit,
 // we advance startBlock past the last-seen block and resume from page 1,
 // so a wallet with a long history is never silently truncated.
-//
-// Known limitation: pages within one call are fetched sequentially, not
-// concurrently (only txlist and tokentx run concurrently with each other -
-// see FetchTransactions). For an extremely high-volume address (tens of
-// thousands of token transfers - observed in practice with a very active
-// real wallet), this can exceed httpapi's request timeout before pricing
-// even starts. The fix would be fetching a batch of pages concurrently
-// instead of one at a time; not done here since the vast majority of
-// real wallets never approach this scale.
 func fetchPaginated[T blockNumbered](ctx context.Context, c *Client, chainID int, action, address string) ([]T, error) {
 	var all []T
 	startBlock := 0
 
 	for {
-		windowFull := false
-		for page := 1; page*pageSize <= maxWindow; page++ {
-			var batch []T
-			err := provider.RetryOnRateLimit(ctx, maxRetries, func() error {
-				b, err := fetchPage[T](ctx, c, chainID, action, address, startBlock, page)
-				if err != nil {
-					return err
-				}
-				batch = b
-				return nil
-			})
-			if err != nil {
-				return nil, err
-			}
-
-			all = append(all, batch...)
-			if len(batch) < pageSize {
-				return all, nil // fewer than a full page - reached the end
-			}
-			if page*pageSize == maxWindow {
-				windowFull = true
-			}
+		batch, reachedEnd, err := fetchWindow[T](ctx, c, chainID, action, address, startBlock)
+		if err != nil {
+			return nil, err
 		}
-
-		if !windowFull || len(all) == 0 {
+		all = append(all, batch...)
+		if reachedEnd || len(batch) == 0 {
 			return all, nil
 		}
-		lastBlock, err := all[len(all)-1].blockNum()
+
+		lastBlock, err := batch[len(batch)-1].blockNum()
 		if err != nil {
 			return nil, fmt.Errorf("parsing blockNumber: %w", err)
 		}
@@ -185,7 +191,69 @@ func fetchPaginated[T blockNumbered](ctx context.Context, c *Client, chainID int
 	}
 }
 
+// fetchWindow fetches one pagination window (up to maxPagesPerWindow
+// pages) starting at startBlock, in waves of c.pageWaveSize pages
+// fetched concurrently. Returns the records found and whether the
+// wallet's true end was reached within this window (some page came back
+// with fewer than pageSize records - Etherscan's pagination is strictly
+// ordered, so every later page is guaranteed empty regardless of what a
+// wave fetched out of order).
+func fetchWindow[T blockNumbered](ctx context.Context, c *Client, chainID int, action, address string, startBlock int) ([]T, bool, error) {
+	var all []T
+
+	for waveStart := 1; waveStart <= maxPagesPerWindow; waveStart += c.pageWaveSize {
+		waveEnd := waveStart + c.pageWaveSize - 1
+		if waveEnd > maxPagesPerWindow {
+			waveEnd = maxPagesPerWindow
+		}
+
+		results := make([][]T, waveEnd-waveStart+1)
+		errs := make([]error, len(results))
+
+		var wg sync.WaitGroup
+		for page := waveStart; page <= waveEnd; page++ {
+			wg.Add(1)
+			go func(page int) {
+				defer wg.Done()
+				idx := page - waveStart
+				errs[idx] = provider.RetryOnRateLimit(ctx, maxRetries, func() error {
+					b, err := fetchPage[T](ctx, c, chainID, action, address, startBlock, page)
+					if err != nil {
+						return err
+					}
+					results[idx] = b // each goroutine owns a disjoint index - no race
+					return nil
+				})
+			}(page)
+		}
+		wg.Wait()
+
+		for _, err := range errs {
+			if err != nil {
+				return nil, false, err
+			}
+		}
+
+		// Walk in page order (not fetch-completion order) so the first
+		// partial page found - even if a higher-numbered page in this
+		// same wave happened to return data too - is treated as the
+		// authoritative end, exactly matching sequential-fetch semantics.
+		for _, batch := range results {
+			all = append(all, batch...)
+			if len(batch) < pageSize {
+				return all, true, nil
+			}
+		}
+	}
+
+	return all, false, nil // window fully consumed, every page full
+}
+
 func fetchPage[T any](ctx context.Context, c *Client, chainID int, action, address string, startBlock, page int) ([]T, error) {
+	if err := c.limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
+
 	q := url.Values{}
 	q.Set("chainid", strconv.Itoa(chainID))
 	q.Set("module", "account")

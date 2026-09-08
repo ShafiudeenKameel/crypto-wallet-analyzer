@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/shopspring/decimal"
+	"golang.org/x/time/rate"
 )
 
 func usd(v string) decimal.Decimal { return decimal.RequireFromString(v) }
@@ -108,14 +110,14 @@ func TestFetchTransactions_UnsupportedChainNeverCallsNetwork(t *testing.T) {
 // exhausted: 10 full pages (10000 records) must trigger a startblock
 // advance and a fresh page-1 request, picking up the remaining records.
 func TestFetchTransactions_AdvancesPastTenThousandWindow(t *testing.T) {
-	var txlistRequests int
+	var txlistRequests atomic.Int32 // pages within a wave are fetched concurrently - this handler is called from multiple goroutines
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		if q.Get("action") == "tokentx" {
 			writeEnvelope(w, []map[string]string{})
 			return
 		}
-		txlistRequests++
+		txlistRequests.Add(1)
 
 		startBlock, _ := strconv.Atoi(q.Get("startblock"))
 		page, _ := strconv.Atoi(q.Get("page"))
@@ -144,8 +146,14 @@ func TestFetchTransactions_AdvancesPastTenThousandWindow(t *testing.T) {
 	if len(txs) != wantTotal {
 		t.Errorf("got %d transactions, want %d", len(txs), wantTotal)
 	}
-	if wantRequests := 11; txlistRequests != wantRequests {
-		t.Errorf("made %d txlist requests, want %d (10 to fill the window + 1 after advancing startblock)", txlistRequests, wantRequests)
+	// 10 to fill the window (2 waves of 4 + 1 wave of 2, all full) + 4 more
+	// for round 2's first wave, which fetches pages 1-4 concurrently before
+	// noticing page 1 was already partial - the bounded waste (up to
+	// pageWaveSize-1 extra calls) that concurrent pagination trades for
+	// speed on genuinely large wallets. Only page 1's 500 records get used;
+	// pages 2-4's results are fetched but never appended - see fetchWindow.
+	if wantRequests := int32(14); txlistRequests.Load() != wantRequests {
+		t.Errorf("made %d txlist requests, want %d", txlistRequests.Load(), wantRequests)
 	}
 }
 
@@ -167,6 +175,44 @@ func TestFetchTransactions_FetchesTxlistAndTokentxConcurrently(t *testing.T) {
 
 	if elapsed >= 90*time.Millisecond {
 		t.Errorf("took %v, want close to 50ms (concurrent) not ~100ms (sequential)", elapsed)
+	}
+}
+
+// TestFetchWindow_PagesFetchConcurrently proves pages within one window
+// actually fetch concurrently. Calls fetchWindow directly (same package)
+// rather than the full FetchTransactions - isolates the measurement from
+// rate limiting (disabled here; tested separately) and from tokentx's
+// concurrent-but-otherwise-irrelevant noise, so the timing signal is
+// clean instead of accumulating scheduling noise across many rounds.
+func TestFetchWindow_PagesFetchConcurrently(t *testing.T) {
+	const delay = 60 * time.Millisecond
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(delay)
+		records := make([]map[string]string, pageSize)
+		for i := range records {
+			records[i] = map[string]string{
+				"blockNumber": strconv.Itoa(i), "timeStamp": "1700000000", "hash": "0xh",
+				"from": "0xAlice", "to": "0xBob", "value": "0", "gasUsed": "21000", "gasPrice": "1", "isError": "0",
+			}
+		}
+		writeEnvelope(w, records)
+	})
+	c.limiter = rate.NewLimiter(rate.Inf, 1000) // isolate concurrency from rate limiting
+
+	start := time.Now()
+	_, _, err := fetchWindow[rawNormalTx](context.Background(), c, 1, "txlist", "0xAlice", 0)
+	if err != nil {
+		t.Fatalf("fetchWindow failed: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// One window = 10 pages, pageWaveSize=4 -> 3 waves (4+4+2). If pages
+	// within a wave truly run concurrently, elapsed is roughly 3*delay
+	// (180ms); sequential one-at-a-time fetching would need 10*delay
+	// (600ms). Asserting well under that, with generous margin for
+	// scheduling noise, while still clearly distinguishing the two.
+	if maxExpected := 7 * delay; elapsed >= maxExpected {
+		t.Errorf("took %v, want under %v (~3 wave-durations, not 10 sequential page fetches)", elapsed, maxExpected)
 	}
 }
 

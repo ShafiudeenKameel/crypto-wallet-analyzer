@@ -48,9 +48,18 @@ type Client struct {
 // variable at the call site (see cmd/server) - this package never reads
 // the environment itself, so it stays trivially testable.
 func NewClient(apiKey string) *Client {
+	// Go's default transport caps idle connections at 2 per host.
+	// aggregate.PriceEnricher runs up to 8 workers concurrently calling
+	// this client - without raising this, most of those concurrent
+	// requests can't reuse a pooled connection and pay a fresh TCP+TLS
+	// handshake instead. Clone() keeps every other default (proxy
+	// support, TLS config) rather than reconstructing them by hand.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = 10
+
 	return &Client{
 		apiKey:     apiKey,
-		httpClient: &http.Client{Timeout: 15 * time.Second},
+		httpClient: &http.Client{Timeout: 15 * time.Second, Transport: transport},
 		baseURL:    defaultBaseURL,
 	}
 }
