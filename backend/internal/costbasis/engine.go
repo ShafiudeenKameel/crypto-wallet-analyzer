@@ -60,7 +60,10 @@ func Compute(txs []domain.Transaction, currentPrices []CurrentPrice) Result {
 
 	states := make(map[assetKey]*state)
 	var gasFeesUSD decimal.Decimal
-	var skipped []domain.Transaction
+	// Non-nil even when empty: encoding/json marshals a nil slice as null,
+	// and a well-behaved API shouldn't make every caller defensively
+	// null-check an array that's simply empty.
+	skipped := make([]domain.Transaction, 0)
 
 	for _, tx := range sorted {
 		if gas, ok := gasPaidUSD(tx); ok {
@@ -84,7 +87,12 @@ func Compute(txs []domain.Transaction, currentPrices []CurrentPrice) Result {
 		key := keyFor(tx.ChainID, tx.ContractAddress)
 		st, exists := states[key]
 		if !exists {
-			st = &state{asset: domain.AssetRef{ChainID: tx.ChainID, ContractAddress: tx.ContractAddress, Symbol: tx.AssetSymbol}}
+			st = &state{
+				asset:        domain.AssetRef{ChainID: tx.ChainID, ContractAddress: tx.ContractAddress, Symbol: tx.AssetSymbol},
+				lots:         make([]Lot, 0),
+				disposals:    make([]Disposal, 0),
+				incomeEvents: make([]IncomeEvent, 0),
+			}
 			states[key] = st
 		}
 
@@ -96,7 +104,7 @@ func Compute(txs []domain.Transaction, currentPrices []CurrentPrice) Result {
 		}
 	}
 
-	result := Result{Skipped: skipped}
+	result := Result{Skipped: skipped, PerAsset: make([]AssetSummary, 0, len(states))}
 	result.Totals.GasFeesUSD = gasFeesUSD
 
 	for _, st := range states {

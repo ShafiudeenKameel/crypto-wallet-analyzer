@@ -17,23 +17,29 @@ import (
 
 // FailedLookup pairs a transaction with the price-lookup error that
 // prevented it from being valued - surfaced, never silently dropped.
+//
+// ErrorMessage, not the error interface itself: encoding/json can't
+// usefully marshal an arbitrary error (it typically has only unexported
+// fields and would serialize as "{}"), so the message is captured as a
+// plain string at construction time - the one place that still has the
+// real error to call .Error() on.
 type FailedLookup struct {
-	Transaction domain.Transaction
-	Err         error
+	Transaction  domain.Transaction `json:"transaction"`
+	ErrorMessage string             `json:"error"`
 }
 
 // Result is the full output of one wallet analysis run.
 type Result struct {
-	WalletAddress string
-	ChainID       int
+	WalletAddress string `json:"walletAddress"`
+	ChainID       int    `json:"chainId"`
 
 	// TransactionCount is the raw count fetched, before any filtering -
 	// this is the "Found and processed N transactions" figure a user can
 	// cross-check against the block explorer themselves.
-	TransactionCount int
+	TransactionCount int `json:"transactionCount"`
 
-	CostBasis          costbasis.Result
-	FailedPriceLookups []FailedLookup
+	CostBasis          costbasis.Result `json:"costBasis"`
+	FailedPriceLookups []FailedLookup   `json:"failedPriceLookups"`
 }
 
 // Service runs the full pipeline for one wallet.
@@ -71,10 +77,10 @@ func (s *Service) Analyze(ctx context.Context, walletAddress string, chainID int
 	enriched := s.Enricher.Enrich(ctx, classified)
 
 	priced := make([]domain.Transaction, 0, len(enriched))
-	var failed []FailedLookup
+	failed := make([]FailedLookup, 0)
 	for _, r := range enriched {
 		if r.Err != nil {
-			failed = append(failed, FailedLookup{Transaction: r.Transaction, Err: r.Err})
+			failed = append(failed, FailedLookup{Transaction: r.Transaction, ErrorMessage: r.Err.Error()})
 			continue
 		}
 		priced = append(priced, r.Transaction)
