@@ -136,6 +136,15 @@ type blockNumbered interface {
 // page*offset at 10000 ("result window too large" past that) - once hit,
 // we advance startBlock past the last-seen block and resume from page 1,
 // so a wallet with a long history is never silently truncated.
+//
+// Known limitation: pages within one call are fetched sequentially, not
+// concurrently (only txlist and tokentx run concurrently with each other -
+// see FetchTransactions). For an extremely high-volume address (tens of
+// thousands of token transfers - observed in practice with a very active
+// real wallet), this can exceed httpapi's request timeout before pricing
+// even starts. The fix would be fetching a batch of pages concurrently
+// instead of one at a time; not done here since the vast majority of
+// real wallets never approach this scale.
 func fetchPaginated[T blockNumbered](ctx context.Context, c *Client, chainID int, action, address string) ([]T, error) {
 	var all []T
 	startBlock := 0
