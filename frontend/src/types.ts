@@ -58,10 +58,12 @@ export interface Lot {
   costBasisUSD: string
   acquiredAt: string
   sourceTxHash: string
+  sourceExplorerUrl: string
 }
 
 export interface Disposal {
   sourceTxHash: string
+  sourceExplorerUrl: string
   quantity: string
   proceedsUSD: string
   costBasisUSD: string
@@ -70,6 +72,7 @@ export interface Disposal {
 
 export interface IncomeEvent {
   sourceTxHash: string
+  sourceExplorerUrl: string
   type: TxType
   quantity: string
   valueUSD: string

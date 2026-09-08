@@ -18,14 +18,13 @@ export function formatUsd(value: string | null): string {
   return usdFormatter.format(Number(value))
 }
 
-export function formatQuantity(value: string, decimals: number): string {
-  const n = Number(value)
-  // Token amounts can have many decimal places (18 for ETH) - showing
-  // all of them is noise, but rounding to 0 is misleading for anything
-  // smaller than $1. 6 significant-ish decimal places is a reasonable
-  // middle ground for a display value nothing further computes from.
-  const shown = Math.min(decimals, 6)
-  return n.toLocaleString('en-US', { maximumFractionDigits: shown })
+export function formatQuantity(value: string): string {
+  // Amounts arrive already decimal-shifted (the backend divides by each
+  // token's own decimals at fetch time - see etherscan.go's parseAmount),
+  // so this only trims display precision, it never re-derives the value.
+  // Showing all 18 raw decimal places would be noise; 6 is a reasonable
+  // middle ground for a value nothing further computes from.
+  return Number(value).toLocaleString('en-US', { maximumFractionDigits: 6 })
 }
 
 export function formatDate(iso: string): string {
